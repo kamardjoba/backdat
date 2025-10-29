@@ -27,6 +27,26 @@ app.get("/api/items", async (req, res) => {
   }
 });
 
+// Добавление новой записи через POST
+app.post("/api/items", async (req, res) => {
+  try {
+    const { name } = req.body;
+    if (!name || name.trim() === "") {
+      return res.status(400).json({ error: "Name is required" });
+    }
+
+    const { rows } = await pool.query(
+      "INSERT INTO items(name) VALUES ($1) RETURNING id, name, created_at",
+      [name]
+    );
+
+    res.status(201).json(rows[0]); // возвращаем добавленную запись
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "db_error" });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 
 ensureDb()
