@@ -9,7 +9,9 @@ ALTER TABLE IF EXISTS venues
   ADD COLUMN IF NOT EXISTS cols_count INT,
   ADD COLUMN IF NOT EXISTS seating_map JSONB;
 
--- === COMPAT: PROMOS (добавляем недостающие поля, если таблица уже существовала) ===
+-- === COMPAT: PROMOS (расширенная совместимость) ===
+
+-- Добавим недостающие колонки, если таблица старая
 ALTER TABLE IF EXISTS promos
   ADD COLUMN IF NOT EXISTS discount_pct INT,
   ADD COLUMN IF NOT EXISTS valid_from   TIMESTAMPTZ,
@@ -17,8 +19,37 @@ ALTER TABLE IF EXISTS promos
   ADD COLUMN IF NOT EXISTS max_usage    INT,
   ADD COLUMN IF NOT EXISTS used_count   INT DEFAULT 0;
 
--- Индекс по сроку действия (если нет)
+-- Индекс по сроку действия
 CREATE INDEX IF NOT EXISTS promos_valid_idx ON promos(valid_until);
+
+-- Если в старой схеме есть столбец "discount_percent" с NOT NULL — снимаем ограничение,
+-- чтобы вставки с использованием "discount_pct" не падали.
+DO $$
+DECLARE
+  has_discount_percent boolean;
+BEGIN
+  SELECT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name='promos' AND column_name='discount_percent'
+  ) INTO has_discount_percent;
+
+  IF has_discount_percent THEN
+    -- снять NOT NULL, если он есть
+    BEGIN
+      EXECUTE 'ALTER TABLE promos ALTER COLUMN discount_percent DROP NOT NULL';
+    EXCEPTION WHEN others THEN
+      -- если NOT NULL уже снят — игнорируем
+    END;
+
+    -- подстраховка: если уже есть записи, у которых discount_percent IS NULL,
+    -- но discount_pct задан — проставим
+    EXECUTE '
+      UPDATE promos
+      SET discount_percent = discount_pct
+      WHERE discount_percent IS NULL AND discount_pct IS NOT NULL
+    ';
+  END IF;
+END$$;
 
 -- 2) Если раньше были колонки "rows"/"cols", перенесём их значения в rows_count/cols_count (не затирая существующие)
 DO $$
