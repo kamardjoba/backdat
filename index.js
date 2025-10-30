@@ -94,6 +94,88 @@ app.get("/api/events/:id/seats", async (req, res) => {
   res.json(out);
 });
 
+// Bulk create events (multiple dates/cities/venues for one artist)
+app.post("/api/admin/events/bulk", async (req, res) => {
+  const { artist_id, events } = req.body || {};
+  if (!artist_id || !Array.isArray(events) || !events.length) {
+    return res.status(400).json({ error: "bad_payload" });
+  }
+
+  try {
+    await pool.query("BEGIN");
+    const created = [];
+
+    for (const ev of events) {
+      let venueId = ev.venue_id;
+
+      // Если venue не указан — создаём его на лету
+      if (!venueId && ev.venue) {
+        const { name, city, address, rows, cols } = ev.venue || {};
+        if (!name || !city || !rows || !cols) {
+          await pool.query("ROLLBACK");
+          return res.status(400).json({ error: "bad_venue_payload" });
+        }
+
+        // создаём venue
+        const v = await pool.query(`
+          INSERT INTO venues(name, city, address, rows_count, cols_count, seating_map)
+          VALUES ($1,$2,$3,$4,$5,'{}'::jsonb)
+          RETURNING id, name, city
+        `, [name, city, address || "", Number(rows), Number(cols)]);
+        venueId = v.rows[0].id;
+
+        // генерируем места (как в /api/admin/venues)
+        for (let r = 1; r <= Number(rows); r++) {
+          for (let c = 1; c <= Number(cols); c++) {
+            await pool.query(`
+              INSERT INTO venue_seats(venue_id, row_number, seat_number, zone_code, seat_type)
+              VALUES ($1, $2, $3, $4, 'seat')
+            `, [venueId, r, c, r <= 3 ? "VIP" : r <= 7 ? "A" : "B"]);
+          }
+        }
+      }
+
+      if (!venueId) {
+        await pool.query("ROLLBACK");
+        return res.status(400).json({ error: "venue_required" });
+      }
+      if (!ev.starts_at) {
+        await pool.query("ROLLBACK");
+        return res.status(400).json({ error: "starts_at_required" });
+      }
+
+      // создаём событие
+      const e = await pool.query(`
+        INSERT INTO events(artist_id, venue_id, starts_at, title)
+        VALUES ($1,$2,$3,$4)
+        RETURNING id, artist_id AS "artistId", venue_id AS "venueId", starts_at AS "startsAt", title, status
+      `, [Number(artist_id), Number(venueId), ev.starts_at, ev.title || null]);
+
+      // инициализируем availability как available (опционально)
+      // можно оптимизировать массовой вставкой, если нужно
+      const seats = await pool.query(`
+        SELECT id FROM venue_seats WHERE venue_id=$1
+      `, [venueId]);
+      const eventId = e.rows[0].id;
+      for (const s of seats.rows) {
+        await pool.query(`
+          INSERT INTO seat_availability(event_id, seat_id, status)
+          VALUES ($1, $2, 'available')
+        `, [eventId, s.id]);
+      }
+
+      created.push(e.rows[0]);
+    }
+
+    await pool.query("COMMIT");
+    res.status(201).json({ ok: true, events: created });
+  } catch (err) {
+    await pool.query("ROLLBACK");
+    console.error("bulk events error:", err);
+    res.status(500).json({ error: "bulk_create_failed" });
+  }
+});
+
 // Create hold(s)
 app.post("/api/holds", async (req, res) => {
   const { event_id, seat_ids, user_token } = req.body || {};
