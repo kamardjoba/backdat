@@ -333,6 +333,35 @@ app.post("/api/admin/events", async (req, res) => {
   const { artist_id, venue_id, starts_at, title, prices } = req.body || {};
   if (!artist_id || !venue_id || !starts_at) return res.status(400).json({ error: "bad_payload" });
 
+
+// Delete artist (and cascade related rows via FK)
+app.delete("/api/admin/artists/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  if(!id) return res.status(400).json({ error: "bad_id" });
+  try {
+    const r = await pool.query("DELETE FROM artists WHERE id=$1", [id]);
+    if(r.rowCount === 0) return res.status(404).json({ error: "not_found" });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "artist_delete_failed" });
+  }
+});
+
+// Backward-compatible alias expected by FE
+app.delete("/api/admin/actors/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  if(!id) return res.status(400).json({ error: "bad_id" });
+  try {
+    const r = await pool.query("DELETE FROM artists WHERE id=$1", [id]);
+    if(r.rowCount === 0) return res.status(404).json({ error: "not_found" });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "artist_delete_failed" });
+  }
+});
+
   try {
     await pool.query("BEGIN");
     const ev = await pool.query(`
