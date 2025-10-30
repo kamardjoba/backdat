@@ -1,13 +1,16 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import multer from "multer";
 import { pool, ensureDb } from "./lib/db.js";
 
 dotenv.config();
 const app = express();
 
+
 app.use(cors());            // пока оставим открытым, потом можно ограничить доменом Netlify
 app.use(express.json());
+const upload = multer({ dest: "uploads/" });
 
 // Быстрый пинг сервера
 app.get("/health", (req, res) => {
@@ -30,6 +33,43 @@ app.get("/api/items", async (req, res) => {
 app.get("/api/actors", async (req, res) => {
   const { rows } = await pool.query(`SELECT id, name, photo_url AS "photoUrl", bio FROM actors ORDER BY id`);
   res.json(rows);
+});
+
+import { v2 as cloudinary } from "cloudinary";
+cloudinary.config({ secure: true });
+
+app.post("/api/admin/actors", upload.single("photo"), async (req, res) => {
+  try {
+    const { name, bio } = req.body;
+    if (!name) return res.status(400).json({ error: "name_required" });
+
+    let photoUrl = null;
+    if (req.file) {
+      const uploadRes = await cloudinary.uploader.upload(req.file.path, {
+        folder: "actors",
+      });
+      photoUrl = uploadRes.secure_url;
+    }
+
+    const { rows } = await pool.query(
+      `INSERT INTO actors(name, bio, photo_url)
+       VALUES ($1, $2, $3)
+       RETURNING id, name, bio, photo_url AS "photoUrl"`,
+      [name, bio || "", photoUrl]
+    );
+
+    res.status(201).json(rows[0]);
+  } catch (e) {
+    console.error("add actor error", e);
+    res.status(500).json({ error: "db_error" });
+  }
+});
+
+app.delete("/api/admin/actors/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  if (!id) return res.status(400).json({ error: "bad_id" });
+  await pool.query(`DELETE FROM actors WHERE id = $1`, [id]);
+  res.json({ ok: true });
 });
 
 app.get("/api/venues", async (req, res) => {
