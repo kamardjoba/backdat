@@ -9,6 +9,17 @@ ALTER TABLE IF EXISTS venues
   ADD COLUMN IF NOT EXISTS cols_count INT,
   ADD COLUMN IF NOT EXISTS seating_map JSONB;
 
+-- === COMPAT: PROMOS (добавляем недостающие поля, если таблица уже существовала) ===
+ALTER TABLE IF EXISTS promos
+  ADD COLUMN IF NOT EXISTS discount_pct INT,
+  ADD COLUMN IF NOT EXISTS valid_from   TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS valid_until  TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS max_usage    INT,
+  ADD COLUMN IF NOT EXISTS used_count   INT DEFAULT 0;
+
+-- Индекс по сроку действия (если нет)
+CREATE INDEX IF NOT EXISTS promos_valid_idx ON promos(valid_until);
+
 -- 2) Если раньше были колонки "rows"/"cols", перенесём их значения в rows_count/cols_count (не затирая существующие)
 DO $$
 BEGIN
