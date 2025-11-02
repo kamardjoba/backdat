@@ -9,6 +9,28 @@ import { v2 as cloudinary } from "cloudinary";
 import { v4 as uuidv4 } from "uuid";
 import fs from "fs";
 
+import bcrypt from "bcrypt";
+import jwt from "jsonwebtoken";
+
+const JWT_SECRET = process.env.JWT_SECRET || "change_me";
+const JWT_EXPIRES = process.env.JWT_EXPIRES || "7d";
+
+function signToken(user){
+  return jwt.sign({ id:user.id, email:user.email, role:user.role }, JWT_SECRET, { expiresIn: JWT_EXPIRES });
+}
+
+function auth(req, res, next){
+  const h = req.headers.authorization || "";
+  const [, token] = h.split(" ");
+  if(!token) return res.status(401).json({ error: "unauthorized" });
+  try{
+    req.user = jwt.verify(token, JWT_SECRET);
+    next();
+  }catch(e){
+    return res.status(401).json({ error: "invalid_token" });
+  }
+}
+
 dotenv.config();
 
 const app = express();
@@ -58,6 +80,79 @@ app.get("/api/events", async (req, res) => {
   `);
   res.json(rows);
 });
+
+// REGISTER
+app.post("/api/auth/register", async (req,res)=>{
+  const { email, password, name } = req.body || {};
+  if(!email || !password) return res.status(400).json({ error:"bad_payload" });
+  try{
+    const hash = await bcrypt.hash(password, 12);
+    const u = await pool.query(`
+      INSERT INTO users(email, pass_hash, role) VALUES ($1,$2,'user')
+      ON CONFLICT (email) DO NOTHING
+      RETURNING id, email, role
+    `, [email.toLowerCase(), hash]);
+
+    if(!u.rows.length) return res.status(409).json({ error:"email_taken" });
+
+    // опционально сохраним имя в artists? Лучше завести users_profile, но можно в orders хранить buyer_name
+    const token = signToken(u.rows[0]);
+    res.json({ token, user:{ id:u.rows[0].id, email:u.rows[0].email, name: name || "", role:u.rows[0].role } });
+  }catch(e){ console.error(e); res.status(500).json({ error:"register_failed" }); }
+});
+
+// LOGIN
+app.post("/api/auth/login", async (req,res)=>{
+  const { email, password } = req.body || {};
+  if(!email || !password) return res.status(400).json({ error:"bad_payload" });
+  try{
+    const q = await pool.query(`SELECT id, email, pass_hash, role FROM users WHERE email=$1`, [email.toLowerCase()]);
+    const user = q.rows[0];
+    if(!user) return res.status(401).json({ error:"bad_credentials" });
+    const ok = await bcrypt.compare(password, user.pass_hash);
+    if(!ok) return res.status(401).json({ error:"bad_credentials" });
+    const token = signToken(user);
+    res.json({ token, user:{ id:user.id, email:user.email, role:user.role } });
+  }catch(e){ console.error(e); res.status(500).json({ error:"login_failed" }); }
+});
+
+// ME
+app.get("/api/auth/me", auth, async (req,res)=>{
+  const q = await pool.query(`SELECT id, email, role FROM users WHERE id=$1`, [req.user.id]);
+  res.json(q.rows[0]);
+});
+
+// UPDATE PROFILE (минимум: имя/телефон)
+app.put("/api/auth/me", auth, async (req,res)=>{
+  const { name, phone } = req.body || {};
+  // для простоты: профиль можно хранить в users (нужны колонки) или завести таблицу users_profile
+  // Быстрое решение: добавим колонки в users (если хочешь):
+  // ALTER TABLE users ADD COLUMN name TEXT, ADD COLUMN phone TEXT;
+  const q = await pool.query(`UPDATE users SET name=COALESCE($2,name), phone=COALESCE($3,phone) WHERE id=$1
+                              RETURNING id,email,role,name,phone`, [req.user.id, name ?? null, phone ?? null]);
+  res.json(q.rows[0]);
+});
+
+// === MY ORDERS (PROFILE) — ADD AS IS ===
+app.get("/api/my/orders", auth, async (req,res)=>{
+  try{
+    const { rows } = await pool.query(`
+      SELECT o.id, o.created_at, o.total, COALESCE(o.currency,'PLN') AS currency, o.status,
+             e.id AS "eventId", e.starts_at AS "startsAt", e.title,
+             v.id AS "venueId", v.name AS "venueName", v.city
+      FROM orders o
+      JOIN events e ON e.id = o.event_id
+      JOIN venues v ON v.id = e.venue_id
+      WHERE o.user_id = $1
+      ORDER BY o.created_at DESC
+    `, [req.user.id]);
+    res.json(rows);
+  }catch(e){
+    console.error(e);
+    res.status(500).json({ error:"fetch_orders_failed" });
+  }
+});
+// === /MY ORDERS ===
 
 // Event details
 app.get("/api/events/:id", async (req, res) => {
@@ -248,91 +343,103 @@ app.post("/api/promos/validate", async (req, res) => {
 });
 
 // Create order (no payment provider here, just data)
+// === ORDERS HANDLER — REPLACE ENTIRE /api/orders WITH THIS BLOCK ===
 app.post("/api/orders", async (req, res) => {
-  const { event_id, seat_ids, buyer, promo_code, user_token } = req.body || {};
-  if (!event_id || !Array.isArray(seat_ids) || !seat_ids.length || !buyer?.name || !buyer?.email || !user_token) {
+  const { event_id, seat_ids, buyer, promo_code } = req.body || {};
+
+  if (!event_id || !Array.isArray(seat_ids) || !seat_ids.length || !buyer?.name || !buyer?.email) {
     return res.status(400).json({ error: "bad_payload" });
   }
 
-  // цены по зонам
-  const prices = await pool.query(`SELECT zone_code, base_price, multiplier FROM event_prices WHERE event_id=$1`, [event_id]);
-  const priceMap = Object.fromEntries(prices.rows.map(p => [p.zone_code, calcPrice(p)]));
+  // вытащим userId, если пришёл Bearer токен (чтобы привязать заказ к аккаунту)
+  const authHeader = req.headers.authorization || "";
+  let userId = null;
+  if (authHeader.startsWith("Bearer ")) {
+    try { userId = jwt.verify(authHeader.split(" ")[1], JWT_SECRET).id; } catch (e) { userId = null; }
+  }
 
+  const client = await pool.connect();
   try {
-    await pool.query("BEGIN");
+    await client.query("BEGIN");
 
-    // проверим, что места в hold именно у этого пользователя
-    const { rows: seats } = await pool.query(`
-      SELECT h.id AS hold_id, h.seat_id, vs.zone_code AS zone
-      FROM holds h
-      JOIN venue_seats vs ON vs.id = h.seat_id
-      WHERE h.event_id=$1 AND h.user_token=$2 AND h.expires_at>NOW() AND h.seat_id = ANY($3)
-    `, [event_id, user_token, seat_ids]);
-
-    if (seats.length !== seat_ids.length) {
-      await pool.query("ROLLBACK");
-      return res.status(409).json({ error: "hold_mismatch" });
+    // 1) проверим событие и статус
+    const ev = await client.query(`SELECT id, venue_id, starts_at, status FROM events WHERE id=$1`, [event_id]);
+    if (!ev.rows.length || ev.rows[0].status !== 'scheduled') {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ error: "bad_event" });
     }
 
-    // расчёт суммы
-    const itemPrices = seats.map(s => priceMap[s.zone] ?? 0);
-    const subtotal = itemPrices.reduce((a, b) => a + b, 0);
+    // 2) проверим, что места доступны
+    const { rows: seatsData } = await client.query(`
+      SELECT s.id AS seat_id, s.row_number AS row, s.seat_number AS col,
+             COALESCE(pr.base_price, 100)::numeric(10,2) AS price
+      FROM venue_seats s
+      JOIN events e ON e.venue_id = s.venue_id
+      LEFT JOIN event_prices pr ON pr.event_id = e.id AND pr.zone_code = s.zone_code
+      WHERE e.id = $1 AND s.id = ANY($2)
+    `, [event_id, seat_ids]);
+
+    if (seatsData.length !== seat_ids.length) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ error: "some_seats_not_found" });
+    }
+
+    // убедимся в доступности
+    const { rows: taken } = await client.query(`
+      SELECT seat_id FROM seat_availability
+      WHERE event_id=$1 AND seat_id = ANY($2) AND status <> 'available'
+    `, [event_id, seat_ids]);
+
+    if (taken.length) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({ error: "seat_unavailable", seats: taken.map(r => r.seat_id) });
+    }
+
+    // 3) расчёт суммы и скидки
+    const itemPrices = seatsData.map(s => Number(s.price));
+    const subtotal = itemPrices.reduce((a,b)=>a+b, 0);
     let discount = 0;
 
     if (promo_code) {
-      const { rows: promos } = await pool.query(`
-        SELECT code, discount_pct AS pct, max_usage, used_count
-        FROM promos
-        WHERE LOWER(code)=LOWER($1) AND valid_from<=NOW() AND valid_until>=NOW()
-        LIMIT 1
-      `, [promo_code]);
-      if (promos.length) {
-        const p = promos[0];
-        if (p.max_usage == null || p.used_count < p.max_usage) {
-          discount = Math.round(subtotal * (Number(p.pct) / 100) * 100) / 100;
-          await pool.query(`UPDATE promos SET used_count = used_count + 1 WHERE code=$1`, [p.code]);
-          await pool.query(`INSERT INTO promo_usages(code, order_id) VALUES ($1, $2)`, [p.code, uuidv4()]); // пробный usage id, ниже перезапишем корректно
-        }
+      const p = await client.query(`SELECT code, discount_pct, valid_until FROM promos WHERE code=$1`, [promo_code]);
+      if (p.rows.length && (!p.rows[0].valid_until || new Date(p.rows[0].valid_until) > new Date())) {
+        discount = Math.round(subtotal * (Number(p.rows[0].discount_pct)/100));
       }
     }
-    const total = Math.max(0, Math.round((subtotal - discount) * 100) / 100);
 
-    // создаём заказ
-    const orderId = uuidv4();
-    const orderIns = await pool.query(`
-      INSERT INTO orders(id, event_id, buyer_name, buyer_email, promo_code, subtotal, discount, total, status)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending')
-      RETURNING id
-    `, [orderId, event_id, buyer.name, buyer.email, promo_code || null, subtotal, discount, total]);
+    const total = Math.max(0, subtotal - discount);
 
-    // переносим позиции + бронируем места
-    for (let i = 0; i < seats.length; i++) {
-      const s = seats[i];
-      const price = itemPrices[i];
-      await pool.query(`
-        INSERT INTO order_items(order_id, seat_id, price)
-        VALUES ($1,$2,$3)
-      `, [orderId, s.seat_id, price]);
-
-      await pool.query(`
-        UPDATE seat_availability SET status='booked', updated_at=NOW()
-        WHERE event_id=$1 AND seat_id=$2
-      `, [event_id, s.seat_id]);
-    }
-
-    // очищаем holds для этих мест
-    await pool.query(`
-      DELETE FROM holds WHERE event_id=$1 AND seat_id = ANY($2)
+    // 4) забронируем места (статус booked)
+    await client.query(`
+      UPDATE seat_availability SET status='booked'
+      WHERE event_id=$1 AND seat_id = ANY($2) AND status='available'
     `, [event_id, seat_ids]);
 
-    await pool.query("COMMIT");
-    res.status(201).json({ id: orderIns.rows[0].id, subtotal, discount, total, status: "pending" });
+    // 5) создадим заказ и строки
+    const orderId = uuidv4();
+        await client.query(`
+      INSERT INTO orders(id, event_id, buyer_name, buyer_email, promo_code, subtotal, discount, total, status, user_id)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'paid',$9)
+    `, [orderId, event_id, buyer.name, buyer.email, promo_code || null, subtotal, discount, total, userId]);
+
+    for (let i=0; i<seat_ids.length; i++){
+      await client.query(`
+        INSERT INTO order_items(order_id, seat_id, price)
+        VALUES ($1,$2,$3)
+      `, [orderId, seat_ids[i], itemPrices[i]]);
+    }
+
+    await client.query("COMMIT");
+    res.status(201).json({ ok: true, order_id: orderId, total });
   } catch (e) {
-    await pool.query("ROLLBACK");
-    console.error(e);
+    await client.query("ROLLBACK");
+    console.error("order error:", e);
     res.status(500).json({ error: "order_failed" });
+  } finally {
+    client.release();
   }
 });
+// === /ORDERS HANDLER ===
 
 /* ============================
  *        ADMIN  API
@@ -411,10 +518,51 @@ app.post("/api/admin/venues", async (req, res) => {
 });
 
 // Create event + init availability + prices
+// Create event + init availability + prices
 app.post("/api/admin/events", async (req, res) => {
   const { artist_id, venue_id, starts_at, title, prices } = req.body || {};
   if (!artist_id || !venue_id || !starts_at) return res.status(400).json({ error: "bad_payload" });
 
+  try {
+    await pool.query("BEGIN");
+
+    // создаём событие со статусом scheduled
+    const ev = await pool.query(`
+      INSERT INTO events(artist_id, venue_id, starts_at, title, status)
+      VALUES ($1,$2,$3,$4,'scheduled') RETURNING id
+    `, [artist_id, venue_id, starts_at, title || null]);
+
+    const eventId = ev.rows[0].id;
+
+    // цены по зонам (prices: [{zone_code, base_price, multiplier}])
+    if (Array.isArray(prices)) {
+      for (const p of prices) {
+        await pool.query(`
+          INSERT INTO event_prices(event_id, zone_code, base_price, multiplier)
+          VALUES ($1,$2,$3,$4)
+          ON CONFLICT (event_id, zone_code) DO UPDATE
+          SET base_price=EXCLUDED.base_price, multiplier=EXCLUDED.multiplier
+        `, [eventId, p.zone_code, p.base_price, p.multiplier || 1.0]);
+      }
+    }
+
+    // инициализируем availability для всех мест площадки
+    await pool.query(`
+      INSERT INTO seat_availability(event_id, seat_id, status)
+      SELECT $1, vs.id, 'available'
+      FROM venue_seats vs
+      WHERE vs.venue_id = $2
+      ON CONFLICT DO NOTHING
+    `, [eventId, venue_id]);
+
+    await pool.query("COMMIT");
+    res.status(201).json({ id: eventId });
+  } catch (e) {
+    await pool.query("ROLLBACK");
+    console.error(e);
+    res.status(500).json({ error: "event_create_failed" });
+  }
+});
 
 // Delete artist (and cascade related rows via FK)
 app.delete("/api/admin/artists/:id", async (req, res) => {
@@ -441,44 +589,6 @@ app.delete("/api/admin/actors/:id", async (req, res) => {
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "artist_delete_failed" });
-  }
-});
-
-  try {
-    await pool.query("BEGIN");
-    const ev = await pool.query(`
-      INSERT INTO events(artist_id, venue_id, starts_at, title, status)
-      VALUES ($1,$2,$3,$4,'scheduled') RETURNING id
-    `, [artist_id, venue_id, starts_at, title || null]);
-    const eventId = ev.rows[0].id;
-
-    // цены по зонам (prices: [{zone_code, base_price, multiplier}])
-    if (Array.isArray(prices)) {
-      for (const p of prices) {
-        await pool.query(`
-          INSERT INTO event_prices(event_id, zone_code, base_price, multiplier)
-          VALUES ($1,$2,$3,$4)
-          ON CONFLICT (event_id, zone_code) DO UPDATE
-          SET base_price=EXCLUDED.base_price, multiplier=EXCLUDED.multiplier
-        `, [eventId, p.zone_code, p.base_price, p.multiplier || 1.0]);
-      }
-    }
-
-    // инициализируем availability
-    await pool.query(`
-      INSERT INTO seat_availability(event_id, seat_id, status)
-      SELECT $1, vs.id, 'available'
-      FROM venue_seats vs
-      WHERE vs.venue_id = $2
-      ON CONFLICT DO NOTHING
-    `, [eventId, venue_id]);
-
-    await pool.query("COMMIT");
-    res.status(201).json({ id: eventId });
-  } catch (e) {
-    await pool.query("ROLLBACK");
-    console.error(e);
-    res.status(500).json({ error: "event_create_failed" });
   }
 });
 
