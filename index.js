@@ -9,6 +9,8 @@ import { v2 as cloudinary } from "cloudinary";
 import { v4 as uuidv4 } from "uuid";
 import fs from "fs";
 
+import nodemailer from "nodemailer";
+
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 
@@ -59,6 +61,85 @@ app.get("/api/artists", async (req, res) => {
   const { rows } = await pool.query(`SELECT id, name, genre, bio, photo_url AS "photoUrl" FROM artists ORDER BY id DESC`);
   res.json(rows);
 });
+
+
+
+
+
+
+
+// === Mailer (SMTP) ===
+const mailer = nodemailer.createTransport({
+  host: process.env.SMTP_HOST,
+  port: Number(process.env.SMTP_PORT || 587),
+  secure: false, // STARTTLS
+  auth: {
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS,
+  },
+});
+const FROM_EMAIL = process.env.FROM_EMAIL || "Tickets <no-reply@example.com>";
+
+async function sendOrderEmail(orderId) {
+  // заказ + событие + площадка
+  const { rows: ordRows } = await pool.query(`
+    SELECT o.id, o.buyer_name, o.buyer_email, o.total, COALESCE(o.currency,'PLN') AS currency, o.created_at,
+           e.id AS event_id, e.title, e.starts_at,
+           v.name AS venue_name, v.city, v.address
+    FROM orders o
+    JOIN events e ON e.id = o.event_id
+    JOIN venues v ON v.id = e.venue_id
+    WHERE o.id = $1
+  `, [orderId]);
+  if (!ordRows.length) return;
+  const o = ordRows[0];
+
+  // места
+  const { rows: seatRows } = await pool.query(`
+    SELECT vs.row_number AS row, vs.seat_number AS col, vs.zone_code
+    FROM order_items oi
+    JOIN venue_seats vs ON vs.id = oi.seat_id
+    WHERE oi.order_id = $1
+    ORDER BY vs.row_number, vs.seat_number
+  `, [orderId]);
+
+  const seatsList = seatRows.map(s => `Ряд ${s.row}, Место ${s.col}${s.zone_code ? ` (Зона ${s.zone_code})` : ''}`).join('<br/>');
+  const when = new Date(o.starts_at);
+  const whenStr = when.toLocaleString('ru-RU', { dateStyle: 'long', timeStyle: 'short' });
+
+  const html = `
+    <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif">
+      <h2>Билеты успешно куплены 🎟</h2>
+      <p>Здравствуйте, ${o.buyer_name || 'покупатель'}!</p>
+      <p>Ваш заказ <b>#${o.id}</b> оплачен. Детали ниже:</p>
+
+      <h3 style="margin:16px 0 8px">Событие</h3>
+      <p><b>${o.title || 'Событие'}</b><br/>
+         ${o.city || ''}${o.city ? ', ' : ''}${o.venue_name || ''}${o.address ? ', ' + o.address : ''}<br/>
+         ${whenStr}
+      </p>
+
+      <h3 style="margin:16px 0 8px">Места</h3>
+      <p>${seatsList || '—'}</p>
+
+      <h3 style="margin:16px 0 8px">Итого</h3>
+      <p><b>${o.total} ${o.currency}</b></p>
+
+      <hr style="margin:20px 0;border:none;border-top:1px solid #eee" />
+      <p style="color:#555">Спасибо за покупку! Это письмо — подтверждение оплаты. Билеты также доступны в личном кабинете.</p>
+    </div>
+  `;
+
+  await mailer.sendMail({
+    from: FROM_EMAIL,
+    to: o.buyer_email,
+    subject: `Ваши билеты — заказ #${o.id}`,
+    html,
+  });
+}
+
+
+
 
 // Venues
 app.get("/api/venues", async (req, res) => {
@@ -344,18 +425,21 @@ app.post("/api/promos/validate", async (req, res) => {
 
 // Create order (no payment provider here, just data)
 // === ORDERS HANDLER — REPLACE ENTIRE /api/orders WITH THIS BLOCK ===
+// Создать заказ: блокирует места, создаёт заказ со статусом 'paid', шлёт письмо покупателю
 app.post("/api/orders", async (req, res) => {
   const { event_id, seat_ids, buyer, promo_code } = req.body || {};
 
+  // валидация тела
   if (!event_id || !Array.isArray(seat_ids) || !seat_ids.length || !buyer?.name || !buyer?.email) {
     return res.status(400).json({ error: "bad_payload" });
   }
 
-  // вытащим userId, если пришёл Bearer токен (чтобы привязать заказ к аккаунту)
+  // вытащим userId, если пришёл Bearer-токен — чтобы привязать заказ к аккаунту
   const authHeader = req.headers.authorization || "";
   let userId = null;
   if (authHeader.startsWith("Bearer ")) {
-    try { userId = jwt.verify(authHeader.split(" ")[1], JWT_SECRET).id; } catch (e) { userId = null; }
+    try { userId = jwt.verify(authHeader.split(" ")[1], JWT_SECRET).id; }
+    catch { userId = null; }
   }
 
   const client = await pool.connect();
@@ -363,13 +447,16 @@ app.post("/api/orders", async (req, res) => {
     await client.query("BEGIN");
 
     // 1) проверим событие и статус
-    const ev = await client.query(`SELECT id, venue_id, starts_at, status FROM events WHERE id=$1`, [event_id]);
+    const ev = await client.query(
+      `SELECT id, venue_id, starts_at, status FROM events WHERE id=$1`,
+      [event_id]
+    );
     if (!ev.rows.length || ev.rows[0].status !== 'scheduled') {
       await client.query("ROLLBACK");
       return res.status(400).json({ error: "bad_event" });
     }
 
-    // 2) проверим, что места доступны
+    // 2) загрузим цены по местам и убедимся, что они принадлежат этому событию
     const { rows: seatsData } = await client.query(`
       SELECT s.id AS seat_id, s.row_number AS row, s.seat_number AS col,
              COALESCE(pr.base_price, 100)::numeric(10,2) AS price
@@ -384,7 +471,7 @@ app.post("/api/orders", async (req, res) => {
       return res.status(400).json({ error: "some_seats_not_found" });
     }
 
-    // убедимся в доступности
+    // 3) убедимся в доступности мест
     const { rows: taken } = await client.query(`
       SELECT seat_id FROM seat_availability
       WHERE event_id=$1 AND seat_id = ANY($2) AND status <> 'available'
@@ -395,13 +482,16 @@ app.post("/api/orders", async (req, res) => {
       return res.status(409).json({ error: "seat_unavailable", seats: taken.map(r => r.seat_id) });
     }
 
-    // 3) расчёт суммы и скидки
+    // 4) расчёт суммы и скидки
     const itemPrices = seatsData.map(s => Number(s.price));
     const subtotal = itemPrices.reduce((a,b)=>a+b, 0);
     let discount = 0;
 
     if (promo_code) {
-      const p = await client.query(`SELECT code, discount_pct, valid_until FROM promos WHERE code=$1`, [promo_code]);
+      const p = await client.query(
+        `SELECT code, discount_pct, valid_until FROM promos WHERE code=$1`,
+        [promo_code]
+      );
       if (p.rows.length && (!p.rows[0].valid_until || new Date(p.rows[0].valid_until) > new Date())) {
         discount = Math.round(subtotal * (Number(p.rows[0].discount_pct)/100));
       }
@@ -409,28 +499,38 @@ app.post("/api/orders", async (req, res) => {
 
     const total = Math.max(0, subtotal - discount);
 
-    // 4) забронируем места (статус booked)
+    // 5) переведём выбранные места в 'booked'
     await client.query(`
-      UPDATE seat_availability SET status='booked'
+      UPDATE seat_availability
+      SET status='booked'
       WHERE event_id=$1 AND seat_id = ANY($2) AND status='available'
     `, [event_id, seat_ids]);
 
-    // 5) создадим заказ и строки
+    // 6) создаём заказ со статусом 'paid'
     const orderId = uuidv4();
-        await client.query(`
+    await client.query(`
       INSERT INTO orders(id, event_id, buyer_name, buyer_email, promo_code, subtotal, discount, total, status, user_id)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'paid',$9)
     `, [orderId, event_id, buyer.name, buyer.email, promo_code || null, subtotal, discount, total, userId]);
 
-    for (let i=0; i<seat_ids.length; i++){
+    // 7) строки заказа
+    for (let i = 0; i < seat_ids.length; i++) {
       await client.query(`
         INSERT INTO order_items(order_id, seat_id, price)
         VALUES ($1,$2,$3)
       `, [orderId, seat_ids[i], itemPrices[i]]);
     }
 
+    // 8) зафиксируем транзакцию
     await client.query("COMMIT");
+
+    // 9) отправим письмо с подтверждением (асинхронно, чтобы не задерживать ответ)
+    // функция sendOrderEmail(orderId) должна быть объявлена выше и настроена под SMTP
+    sendOrderEmail(orderId).catch(err => console.error("email failed:", err));
+
+    // 10) ответ клиенту
     res.status(201).json({ ok: true, order_id: orderId, total });
+
   } catch (e) {
     await client.query("ROLLBACK");
     console.error("order error:", e);
