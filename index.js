@@ -3,7 +3,7 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import { pool, ensureDb } from "./lib/db.js";
-import { calcPrice } from "./lib/pricing.js";
+//import { calcPrice } from "./lib/pricing.js";
 import multer from "multer";
 import { v2 as cloudinary } from "cloudinary";
 import { v4 as uuidv4 } from "uuid";
@@ -52,11 +52,7 @@ app.get("/health", (req, res) => res.json({ ok: true, time: new Date().toISOStri
 // Ensure DB (migrations)
 await ensureDb();
 
-/* ============================
- *      PUBLIC  API
- * ============================ */
 
-// Artists
 app.get("/api/artists", async (req, res) => {
   const { rows } = await pool.query(`SELECT id, name, genre, bio, photo_url AS "photoUrl" FROM artists ORDER BY id DESC`);
   res.json(rows);
@@ -68,11 +64,11 @@ app.get("/api/artists", async (req, res) => {
 
 
 
-// === Mailer (SMTP) ===
+
 const mailer = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
   port: Number(process.env.SMTP_PORT || 587),
-  secure: false, // STARTTLS
+  secure: false, 
   auth: {
     user: process.env.SMTP_USER,
     pass: process.env.SMTP_PASS,
@@ -141,13 +137,13 @@ async function sendOrderEmail(orderId) {
 
 
 
-// Venues
+
 app.get("/api/venues", async (req, res) => {
   const { rows } = await pool.query(`SELECT id, name, city, address, rows_count AS "rows", cols_count AS "cols" FROM venues ORDER BY id DESC`);
   res.json(rows);
 });
 
-// Events (list upcoming)
+
 app.get("/api/events", async (req, res) => {
   const { rows } = await pool.query(`
     SELECT e.id, e.starts_at AS "startsAt", e.title, e.status,
@@ -162,7 +158,7 @@ app.get("/api/events", async (req, res) => {
   res.json(rows);
 });
 
-// REGISTER
+
 app.post("/api/auth/register", async (req,res)=>{
   const { email, password, name } = req.body || {};
   if(!email || !password) return res.status(400).json({ error:"bad_payload" });
@@ -176,13 +172,13 @@ app.post("/api/auth/register", async (req,res)=>{
 
     if(!u.rows.length) return res.status(409).json({ error:"email_taken" });
 
-    // опционально сохраним имя в artists? Лучше завести users_profile, но можно в orders хранить buyer_name
+
     const token = signToken(u.rows[0]);
     res.json({ token, user:{ id:u.rows[0].id, email:u.rows[0].email, name: name || "", role:u.rows[0].role } });
   }catch(e){ console.error(e); res.status(500).json({ error:"register_failed" }); }
 });
 
-// LOGIN
+
 app.post("/api/auth/login", async (req,res)=>{
   const { email, password } = req.body || {};
   if(!email || !password) return res.status(400).json({ error:"bad_payload" });
@@ -203,7 +199,7 @@ app.get("/api/auth/me", auth, async (req,res)=>{
   res.json(q.rows[0]);
 });
 
-// UPDATE PROFILE (минимум: имя/телефон)
+
 app.put("/api/auth/me", auth, async (req,res)=>{
   const { name, phone } = req.body || {};
   // для простоты: профиль можно хранить в users (нужны колонки) или завести таблицу users_profile
@@ -214,7 +210,7 @@ app.put("/api/auth/me", auth, async (req,res)=>{
   res.json(q.rows[0]);
 });
 
-// === MY ORDERS (PROFILE) — ADD AS IS ===
+
 app.get("/api/my/orders", auth, async (req,res)=>{
   try{
     const { rows } = await pool.query(`
@@ -233,9 +229,7 @@ app.get("/api/my/orders", auth, async (req,res)=>{
     res.status(500).json({ error:"fetch_orders_failed" });
   }
 });
-// === /MY ORDERS ===
 
-// Event details
 app.get("/api/events/:id", async (req, res) => {
   const { rows } = await pool.query(`
     SELECT e.id, e.starts_at AS "startsAt", e.title, e.status, e.dynamic_cfg AS "dynamicCfg",
@@ -433,6 +427,39 @@ app.post("/api/promos/validate", async (req, res) => {
   `, [code]);
 
   res.json(rows[0] || null);
+});
+
+// Детали заказа по ID (минимум — без чувствительных данных)
+app.get("/api/orders/:id", async (req, res) => {
+  const id = String(req.params.id);
+  try {
+    const { rows } = await pool.query(`
+      SELECT o.id, o.created_at, o.status,
+             COALESCE(o.currency,'PLN') AS currency,
+             o.subtotal, o.discount, o.total,
+             e.id AS "eventId", e.title, e.starts_at AS "startsAt",
+             v.name AS "venueName", v.city, v.address
+      FROM orders o
+      JOIN events e ON e.id = o.event_id
+      JOIN venues v ON v.id = e.venue_id
+      WHERE o.id = $1
+    `, [id]);
+    if (!rows.length) return res.status(404).json({ error: "not_found" });
+
+    const order = rows[0];
+    const { rows: items } = await pool.query(`
+      SELECT vs.row_number AS row, vs.seat_number AS seat, oi.price
+      FROM order_items oi
+      JOIN venue_seats vs ON vs.id = oi.seat_id
+      WHERE oi.order_id = $1
+      ORDER BY vs.row_number, vs.seat_number
+    `, [id]);
+
+    res.json({ ...order, items });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "order_fetch_failed" });
+  }
 });
 
 // Create order (no payment provider here, just data)
