@@ -251,24 +251,36 @@ app.get("/api/events/:id", async (req, res) => {
   res.json(rows[0]);
 });
 
-// Seats map with availability and price
 app.get("/api/events/:id/seats", async (req, res) => {
-  const eventId = Number(req.params.id);
-  const prices = await pool.query(`SELECT zone_code, base_price, multiplier FROM event_prices WHERE event_id=$1`, [eventId]);
-  const priceMap = Object.fromEntries(prices.rows.map(p => [p.zone_code, calcPrice(p)]));
+  const eventId = Number(req.params.id)
+  if (!eventId) return res.status(400).json({ error: "bad_event_id" })
 
-  const { rows } = await pool.query(`
-    SELECT sa.seat_id AS "seatId", vs.row_number AS row, vs.seat_number AS seat,
-           vs.zone_code AS zone, sa.status
-    FROM seat_availability sa
-    JOIN venue_seats vs ON vs.id = sa.seat_id
-    WHERE sa.event_id = $1
-    ORDER BY vs.row_number, vs.seat_number
-  `, [eventId]);
+  try {
+    const { rows } = await pool.query(`
+      SELECT
+        vs.id                         AS "seatId",
+        vs.row_number                 AS row,
+        vs.seat_number                AS seat,
+        vs.zone_code                  AS zone,
+        COALESCE(sa.status, 'available')              AS status,
+        COALESCE(pr.base_price, 100)::numeric(10,2)   AS price
+      FROM events e
+      JOIN venue_seats vs
+        ON vs.venue_id = e.venue_id
+      LEFT JOIN seat_availability sa
+        ON sa.event_id = e.id AND sa.seat_id = vs.id
+      LEFT JOIN event_prices pr
+        ON pr.event_id = e.id AND pr.zone_code = vs.zone_code
+      WHERE e.id = $1
+      ORDER BY vs.row_number, vs.seat_number
+    `, [eventId])
 
-  const out = rows.map(r => ({ ...r, price: priceMap[r.zone] ?? null }));
-  res.json(out);
-});
+    res.json(rows)
+  } catch (e) {
+    console.error(e)
+    res.status(500).json({ error: "seats_fetch_failed" })
+  }
+})
 
 // Bulk create events (multiple dates/cities/venues for one artist)
 app.post("/api/admin/events/bulk", async (req, res) => {
