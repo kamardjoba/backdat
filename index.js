@@ -494,36 +494,59 @@ app.post("/api/orders", async (req, res) => {
       return res.status(409).json({ error: "seat_unavailable", seats: taken.map(r => r.seat_id) });
     }
 
-    // 4) расчёт суммы и скидки
     const itemPrices = seatsData.map(s => Number(s.price));
-    const subtotal = itemPrices.reduce((a,b)=>a+b, 0);
-    let discount = 0;
+const subtotal = itemPrices.reduce((a,b)=>a+b, 0);
+let discount = 0;
 
-    if (promo_code) {
-      const p = await client.query(
-        `SELECT code, discount_pct, valid_until FROM promos WHERE code=$1`,
-        [promo_code]
-      );
-      if (p.rows.length && (!p.rows[0].valid_until || new Date(p.rows[0].valid_until) > new Date())) {
-        discount = Math.round(subtotal * (Number(p.rows[0].discount_pct)/100));
-      }
-    }
+if (promo_code) {
+  const p = await client.query(
+    `SELECT code, discount_pct, valid_until FROM promos WHERE code=$1`,
+    [promo_code]
+  );
+  if (p.rows.length && (!p.rows[0].valid_until || new Date(p.rows[0].valid_until) > new Date())) {
+    discount = Math.round(subtotal * (Number(p.rows[0].discount_pct)/100));
+  }
+}
 
-    const total = Math.max(0, subtotal - discount);
+const total = Math.max(0, subtotal - discount);
 
-    // 5) переведём выбранные места в 'booked'
-    await client.query(`
-      UPDATE seat_availability
-      SET status='booked'
-      WHERE event_id=$1 AND seat_id = ANY($2) AND status='available'
-    `, [event_id, seat_ids]);
+// >>> ДОБАВЬ ЭТО СРАЗУ ПОСЛЕ total <<<
+const totals = {
+  currency: 'PLN',
+  subtotal,
+  discount,
+  total,
+  eventId: event_id,
+  items: seat_ids.map((sid, i) => ({
+    seatId: sid,
+    price: itemPrices[i]
+  }))
+};
+// <<< ДОБАВЛЕНО
 
-    // 6) создаём заказ со статусом 'paid'
-    const orderId = uuidv4();
-    await client.query(`
-      INSERT INTO orders(id, event_id, buyer_name, buyer_email, promo_code, subtotal, discount, total, status, user_id)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'paid',$9)
-    `, [orderId, event_id, buyer.name, buyer.email, promo_code || null, subtotal, discount, total, userId]);
+// 5) переведём выбранные места в 'booked'
+await client.query(`
+  UPDATE seat_availability
+  SET status='booked'
+  WHERE event_id=$1 AND seat_id = ANY($2) AND status='available'
+`, [event_id, seat_ids]);
+
+// 6) создаём заказ со статусом 'paid'
+const orderId = uuidv4();
+
+// >>> ЗАМЕНИ СВОЙ INSERT НА ЭТОТ <<<
+await client.query(`
+  INSERT INTO orders(
+    id, event_id, buyer_name, buyer_email, promo_code,
+    subtotal, discount, total, status, user_id, currency, totals_json
+  )
+  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'paid',$9,$10,$11)
+`, [
+  orderId, event_id, buyer.name, buyer.email, promo_code || null,
+  subtotal, discount, total, userId,
+  'PLN',
+  JSON.stringify(totals)
+]);
 
     // 7) строки заказа
     for (let i = 0; i < seat_ids.length; i++) {
