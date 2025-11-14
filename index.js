@@ -414,6 +414,9 @@ app.post("/api/holds/renew", async (req, res) => {
   res.json({ ok: true, expiresAt });
 });
 
+// Admin: delete actor and dependent records (transactional)
+// ЗАМЕЧАНИЕ: подставь реальные имена таблиц, если отличаются (artists, event_artists, photos и т.д.)
+// Admin: безопасное удаление артиста (универсальное, не падает если таблицы нет)
 // Admin: безопасное удаление артиста с проверками таблицы/колонки
 app.delete("/api/admin/actors/:id", async (req, res) => {
   const actorId = req.params.id;
@@ -469,76 +472,6 @@ app.delete("/api/admin/actors/:id", async (req, res) => {
     }
 
     // Наконец — удаляем самого артиста (предполагается таблица artists)
-    const { rowCount } = await client.query("DELETE FROM artists WHERE id = $1", [actorId]);
-
-    await client.query("COMMIT");
-
-    if (rowCount === 0) {
-      return res.status(404).json({ error: "actor_not_found" });
-    }
-
-    console.log(`Admin deleted actor ${actorId} successfully`);
-    return res.json({ ok: true, deleted_actor_id: actorId });
-  } catch (err) {
-    await client.query("ROLLBACK");
-    console.error("admin delete actor failed:", err);
-    return res.status(500).json({ error: "delete_failed", detail: err.message });
-  } finally {
-    client.release();
-  }
-});
-
-  // TODO: проверка авторизации админа
-  // if (!req.user || req.user.role !== 'admin') return res.status(403).json({ error: 'forbidden' });
-
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-
-    // список candidate имен таблиц, которые могли быть использованы в разных схемах/миграциях
-    const candidates = [
-      "event_artists",
-      "artists_events",
-      "events_artists",
-      "artist_events",
-      "artist_event",
-      "artist_photo",      // если есть таблица фото
-      "artist_photos",
-      "artist_medias",
-    ];
-
-    // Проверяем каждую candidate таблицу и, если есть — удаляем записи
-    for (const tbl of candidates) {
-      const check = await client.query("SELECT to_regclass($1) AS r", [`public.${tbl}`]);
-      if (check.rows[0] && check.rows[0].r) {
-        console.log("Found relation, deleting from", tbl);
-        await client.query(`DELETE FROM ${tbl} WHERE artist_id = $1`, [actorId]);
-      } else {
-        // relation не найдена — ничего не делаем
-      }
-    }
-
-    // Удаляем возможные записи в других связанных таблицах по artist_id — добавьте свои имена если нужно
-    const otherCandidates = [
-      "reservation_items", "tickets", "order_items", "artist_photos", "artist_bios"
-    ];
-    for (const tbl of otherCandidates) {
-      const check = await client.query("SELECT to_regclass($1) AS r", [`public.${tbl}`]);
-      if (check.rows[0] && check.rows[0].r) {
-        console.log("Also clearing possible dependent table", tbl);
-        // здесь мы пытаемся удалить записи с полем artist_id — в некоторых таблицах поле может называться иначе,
-        // поэтому если удалка падает, она будет поймана в catch и транзакция откатится (без удаления).
-        try {
-          await client.query(`DELETE FROM ${tbl} WHERE artist_id = $1`, [actorId]);
-        } catch (e) {
-          // если нет колонки artist_id в этой таблице — просто игнорируем
-          console.log(`Could not delete from ${tbl} by artist_id:`, e.message);
-        }
-      }
-    }
-
-    // Наконец — удалить самого артиста. Имя таблицы для артистов в вашем коде похоже "artists" или "artists".
-    // Подставьте точное имя, если у вас оно другое.
     const { rowCount } = await client.query("DELETE FROM artists WHERE id = $1", [actorId]);
 
     await client.query("COMMIT");
