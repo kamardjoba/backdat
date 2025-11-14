@@ -414,6 +414,44 @@ app.post("/api/holds/renew", async (req, res) => {
   res.json({ ok: true, expiresAt });
 });
 
+// Admin: delete actor and dependent records (transactional)
+// ЗАМЕЧАНИЕ: подставь реальные имена таблиц, если отличаются (artists, event_artists, photos и т.д.)
+app.delete("/api/admin/actors/:id", async (req, res) => {
+  const actorId = req.params.id;
+  // TODO: проверка авторизации администратора, если есть
+  // if (!req.user || req.user.role !== 'admin') return res.status(403).json({ error: 'forbidden' });
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    // 1) удалить связи с событиями (если есть таблица связывающая actors и events)
+    // пример имени таблицы: event_artists (замени при необходимости)
+    await client.query("DELETE FROM event_artists WHERE artist_id = $1", [actorId]);
+
+    // 2) удалить фотографии/медиа, связанные с артистом (если есть)
+    // await client.query("DELETE FROM artist_photos WHERE artist_id = $1", [actorId]);
+
+    // 3) удалить артистa (основная таблица artists или artists)
+    const { rowCount } = await client.query("DELETE FROM artists WHERE id = $1", [actorId]);
+
+    await client.query("COMMIT");
+
+    if (rowCount === 0) {
+      return res.status(404).json({ error: "actor_not_found" });
+    }
+
+    console.log(`Admin deleted actor ${actorId} and dependent data`);
+    return res.json({ ok: true, deleted_actor_id: actorId });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error("admin delete actor failed:", err);
+    return res.status(500).json({ error: "delete_failed", detail: err.message });
+  } finally {
+    client.release();
+  }
+});
+
 // Validate promo
 app.post("/api/promos/validate", async (req, res) => {
   const code = String(req.body?.code || "").trim();
