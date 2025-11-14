@@ -414,11 +414,79 @@ app.post("/api/holds/renew", async (req, res) => {
   res.json({ ok: true, expiresAt });
 });
 
-// Admin: delete actor and dependent records (transactional)
-// ЗАМЕЧАНИЕ: подставь реальные имена таблиц, если отличаются (artists, event_artists, photos и т.д.)
-// Admin: безопасное удаление артиста (универсальное, не падает если таблицы нет)
+// Admin: безопасное удаление артиста с проверками таблицы/колонки
 app.delete("/api/admin/actors/:id", async (req, res) => {
   const actorId = req.params.id;
+
+  // TODO: проверка авторизации админа
+  // if (!req.user || req.user.role !== 'admin') return res.status(403).json({ error: 'forbidden' });
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const candidateTables = [
+      // таблицы связей/кандидаты — попробуй свои реальные имена, я оставил часто встречающиеся
+      "event_artists",
+      "artists_events",
+      "events_artists",
+      "artist_events",
+      "artist_photo",
+      "artist_photos",
+      "artist_medias",
+      "order_items",
+      "tickets",
+      "reservation_items",
+      "seat_reservations"
+    ];
+
+    for (const tbl of candidateTables) {
+      // 1) проверка наличия таблицы
+      const tableCheck = await client.query("SELECT to_regclass($1) AS r", [`public.${tbl}`]);
+      if (!tableCheck.rows[0] || !tableCheck.rows[0].r) {
+        // таблицы нет — пропускаем
+        continue;
+      }
+
+      // 2) проверка наличия колонки artist_id
+      const colCheck = await client.query(
+        `SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name=$1 AND column_name='artist_id' LIMIT 1`,
+        [tbl]
+      );
+      if (colCheck.rowCount === 0) {
+        console.log(`Table ${tbl} exists but has no column artist_id — skipping delete by artist_id`);
+        continue;
+      }
+
+      // 3) Выполняем удаление безопасно
+      try {
+        const delRes = await client.query(`DELETE FROM ${tbl} WHERE artist_id = $1`, [actorId]);
+        console.log(`Deleted ${delRes.rowCount} rows from ${tbl} for artist ${actorId}`);
+      } catch (e) {
+        // Ловим неожиданную ошибку, логируем и продолжаем — не прерываем транзакцию
+        console.error(`Failed to delete from ${tbl} by artist_id:`, e.message);
+      }
+    }
+
+    // Наконец — удаляем самого артиста (предполагается таблица artists)
+    const { rowCount } = await client.query("DELETE FROM artists WHERE id = $1", [actorId]);
+
+    await client.query("COMMIT");
+
+    if (rowCount === 0) {
+      return res.status(404).json({ error: "actor_not_found" });
+    }
+
+    console.log(`Admin deleted actor ${actorId} successfully`);
+    return res.json({ ok: true, deleted_actor_id: actorId });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error("admin delete actor failed:", err);
+    return res.status(500).json({ error: "delete_failed", detail: err.message });
+  } finally {
+    client.release();
+  }
+});
 
   // TODO: проверка авторизации админа
   // if (!req.user || req.user.role !== 'admin') return res.status(403).json({ error: 'forbidden' });
