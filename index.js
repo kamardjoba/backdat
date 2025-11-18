@@ -425,6 +425,25 @@ async function deleteArtistHandler(req, res) {
   try {
     await client.query("BEGIN");
 
+    // Блокирующая проверка: если по событиям артиста есть оплаченные заказы,
+    // удаление запрещаем, чтобы не сломать историю покупок.
+    const { rows: blockingOrders } = await client.query(
+      `
+        SELECT COUNT(*)::int AS cnt
+        FROM orders o
+        JOIN events e ON e.id = o.event_id
+        WHERE e.artist_id = $1
+      `,
+      [actorId]
+    );
+
+    if ((blockingOrders[0]?.cnt || 0) > 0) {
+      await client.query("ROLLBACK");
+      return res
+        .status(409)
+        .json({ error: "artist_has_orders", detail: "У артиста есть события с оформленными заказами. Отмените/удалите заказы или переведите события в другой статус перед удалением." });
+    }
+
     const candidateTables = [
       "event_artists",
       "artists_events",
@@ -463,12 +482,12 @@ async function deleteArtistHandler(req, res) {
     }
 
     const { rowCount } = await client.query("DELETE FROM artists WHERE id = $1", [actorId]);
-
-    await client.query("COMMIT");
-
     if (rowCount === 0) {
+      await client.query("ROLLBACK");
       return res.status(404).json({ error: "actor_not_found" });
     }
+
+    await client.query("COMMIT");
 
     console.log(`Admin deleted actor ${actorId} successfully`);
     return res.json({ ok: true, deleted_actor_id: actorId });
