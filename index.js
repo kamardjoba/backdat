@@ -414,12 +414,9 @@ app.post("/api/holds/renew", async (req, res) => {
   res.json({ ok: true, expiresAt });
 });
 
-// Admin: delete actor and dependent records (transactional)
-// ЗАМЕЧАНИЕ: подставь реальные имена таблиц, если отличаются (artists, event_artists, photos и т.д.)
-// Admin: безопасное удаление артиста (универсальное, не падает если таблицы нет)
-// Admin: безопасное удаление артиста с проверками таблицы/колонки
-app.delete("/api/admin/actors/:id", async (req, res) => {
-  const actorId = req.params.id;
+async function deleteArtistHandler(req, res) {
+  const actorId = Number(req.params.id);
+  if (!actorId) return res.status(400).json({ error: "bad_id" });
 
   // TODO: проверка авторизации админа
   // if (!req.user || req.user.role !== 'admin') return res.status(403).json({ error: 'forbidden' });
@@ -429,7 +426,6 @@ app.delete("/api/admin/actors/:id", async (req, res) => {
     await client.query("BEGIN");
 
     const candidateTables = [
-      // таблицы связей/кандидаты — попробуй свои реальные имена, я оставил часто встречающиеся
       "event_artists",
       "artists_events",
       "events_artists",
@@ -444,14 +440,11 @@ app.delete("/api/admin/actors/:id", async (req, res) => {
     ];
 
     for (const tbl of candidateTables) {
-      // 1) проверка наличия таблицы
       const tableCheck = await client.query("SELECT to_regclass($1) AS r", [`public.${tbl}`]);
       if (!tableCheck.rows[0] || !tableCheck.rows[0].r) {
-        // таблицы нет — пропускаем
         continue;
       }
 
-      // 2) проверка наличия колонки artist_id
       const colCheck = await client.query(
         `SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name=$1 AND column_name='artist_id' LIMIT 1`,
         [tbl]
@@ -461,17 +454,14 @@ app.delete("/api/admin/actors/:id", async (req, res) => {
         continue;
       }
 
-      // 3) Выполняем удаление безопасно
       try {
         const delRes = await client.query(`DELETE FROM ${tbl} WHERE artist_id = $1`, [actorId]);
         console.log(`Deleted ${delRes.rowCount} rows from ${tbl} for artist ${actorId}`);
       } catch (e) {
-        // Ловим неожиданную ошибку, логируем и продолжаем — не прерываем транзакцию
         console.error(`Failed to delete from ${tbl} by artist_id:`, e.message);
       }
     }
 
-    // Наконец — удаляем самого артиста (предполагается таблица artists)
     const { rowCount } = await client.query("DELETE FROM artists WHERE id = $1", [actorId]);
 
     await client.query("COMMIT");
@@ -489,7 +479,7 @@ app.delete("/api/admin/actors/:id", async (req, res) => {
   } finally {
     client.release();
   }
-});
+}
 
 // Validate promo
 app.post("/api/promos/validate", async (req, res) => {
@@ -668,7 +658,7 @@ await client.query(`
     sendOrderEmail(orderId).catch(err => console.error("email failed:", err));
 
     // 10) ответ клиенту
-    res.status(201).json({ ok: true, order_id: orderId, total });
+    res.status(201).json({ ok: true, order_id: orderId, total, currency: totals.currency });
 
   } catch (e) {
     await client.query("ROLLBACK");
@@ -803,33 +793,10 @@ app.post("/api/admin/events", async (req, res) => {
   }
 });
 
-// Delete artist (and cascade related rows via FK)
-app.delete("/api/admin/artists/:id", async (req, res) => {
-  const id = Number(req.params.id);
-  if(!id) return res.status(400).json({ error: "bad_id" });
-  try {
-    const r = await pool.query("DELETE FROM artists WHERE id=$1", [id]);
-    if(r.rowCount === 0) return res.status(404).json({ error: "not_found" });
-    res.json({ ok: true });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "artist_delete_failed" });
-  }
-});
-
+// Delete artist (and cascade related rows via FK/cleanup tables)
+app.delete("/api/admin/artists/:id", deleteArtistHandler);
 // Backward-compatible alias expected by FE
-app.delete("/api/admin/actors/:id", async (req, res) => {
-  const id = Number(req.params.id);
-  if(!id) return res.status(400).json({ error: "bad_id" });
-  try {
-    const r = await pool.query("DELETE FROM artists WHERE id=$1", [id]);
-    if(r.rowCount === 0) return res.status(404).json({ error: "not_found" });
-    res.json({ ok: true });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "artist_delete_failed" });
-  }
-});
+app.delete("/api/admin/actors/:id", deleteArtistHandler);
 
 /* ============================
  *   CLEANER for expired holds
