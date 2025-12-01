@@ -319,6 +319,7 @@ app.get("/api/events/:id/seats", async (req, res) => {
         vs.row_number                 AS row,
         vs.seat_number                AS seat,
         vs.zone_code                  AS zone,
+        vs.seat_type                  AS "seatType",
         COALESCE(sa.status, 'available')              AS status,
         COALESCE(pr.base_price, 100)::numeric(10,2)   AS price,
         pz.name                       AS "zoneName",
