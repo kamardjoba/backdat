@@ -251,6 +251,68 @@ app.get("/api/events/:id/seats", async (req, res) => {
   if (!eventId) return res.status(400).json({ error: "bad_event_id" })
 
   try {
+    // Сначала проверяем, существует ли событие и получаем venue_id
+    const eventCheck = await pool.query(`
+      SELECT e.id, e.venue_id, v.rows_count, v.cols_count
+      FROM events e
+      JOIN venues v ON v.id = e.venue_id
+      WHERE e.id = $1
+    `, [eventId])
+
+    if (eventCheck.rows.length === 0) {
+      return res.status(404).json({ error: "event_not_found" })
+    }
+
+    const { venue_id, rows_count, cols_count } = eventCheck.rows[0]
+
+    // Проверяем, есть ли места для этой площадки
+    const seatsCount = await pool.query(`
+      SELECT COUNT(*) as count FROM venue_seats WHERE venue_id = $1
+    `, [venue_id])
+
+    // Если мест нет, создаём их автоматически
+    if (parseInt(seatsCount.rows[0].count) === 0 && rows_count && cols_count) {
+      await pool.query("BEGIN")
+      
+      // Создаём дефолтные зоны, если их нет
+      await pool.query(`
+        INSERT INTO price_zones(venue_id, code, name, base_color)
+        VALUES
+          ($1,'VIP','VIP','#d97706'),
+          ($1,'A','Zone A','#16a34a'),
+          ($1,'B','Zone B','#2563eb')
+        ON CONFLICT (venue_id, code) DO NOTHING
+      `, [venue_id])
+
+      // Создаём места для площадки
+      for (let r = 1; r <= rows_count; r++) {
+        const zone = r <= 3 ? "VIP" : r <= 7 ? "A" : "B"
+        const values = []
+        for (let c = 1; c <= cols_count; c++) {
+          values.push(`(${venue_id},${r},${c},'${zone}','seat')`)
+        }
+        if (values.length > 0) {
+          await pool.query(`
+            INSERT INTO venue_seats(venue_id,row_number,seat_number,zone_code,seat_type)
+            VALUES ${values.join(",")}
+            ON CONFLICT (venue_id, row_number, seat_number) DO NOTHING
+          `)
+        }
+      }
+
+      // Инициализируем availability для всех мест события
+      await pool.query(`
+        INSERT INTO seat_availability(event_id, seat_id, status)
+        SELECT $1, vs.id, 'available'
+        FROM venue_seats vs
+        WHERE vs.venue_id = $2
+        ON CONFLICT DO NOTHING
+      `, [eventId, venue_id])
+
+      await pool.query("COMMIT")
+    }
+
+    // Получаем места
     const { rows } = await pool.query(`
       SELECT
         vs.id                         AS "seatId",
@@ -273,7 +335,7 @@ app.get("/api/events/:id/seats", async (req, res) => {
     res.json(rows)
   } catch (e) {
     console.error(e)
-    res.status(500).json({ error: "seats_fetch_failed" })
+    res.status(500).json({ error: "seats_fetch_failed", details: e.message })
   }
 })
 
@@ -764,6 +826,51 @@ app.post("/api/admin/events", async (req, res) => {
 
   try {
     await pool.query("BEGIN");
+
+    // Проверяем, есть ли у площадки места, если нет - создаём их
+    const seatsCheck = await pool.query(`
+      SELECT COUNT(*) as count FROM venue_seats WHERE venue_id = $1
+    `, [venue_id]);
+    
+    if (parseInt(seatsCheck.rows[0].count) === 0) {
+      // Получаем размеры площадки
+      const venueInfo = await pool.query(`
+        SELECT rows_count, cols_count FROM venues WHERE id = $1
+      `, [venue_id]);
+      
+      if (venueInfo.rows.length === 0) {
+        await pool.query("ROLLBACK");
+        return res.status(400).json({ error: "venue_not_found" });
+      }
+
+      const { rows_count, cols_count } = venueInfo.rows[0];
+      
+      // Создаём дефолтные зоны, если их нет
+      await pool.query(`
+        INSERT INTO price_zones(venue_id, code, name, base_color)
+        VALUES
+          ($1,'VIP','VIP','#d97706'),
+          ($1,'A','Zone A','#16a34a'),
+          ($1,'B','Zone B','#2563eb')
+        ON CONFLICT (venue_id, code) DO NOTHING
+      `, [venue_id]);
+
+      // Создаём места для площадки (ряды 1-3 VIP, 4-7 A, остальное B)
+      for (let r = 1; r <= rows_count; r++) {
+        const zone = r <= 3 ? "VIP" : r <= 7 ? "A" : "B";
+        const values = [];
+        for (let c = 1; c <= cols_count; c++) {
+          values.push(`(${venue_id},${r},${c},'${zone}','seat')`);
+        }
+        if (values.length > 0) {
+          await pool.query(`
+            INSERT INTO venue_seats(venue_id,row_number,seat_number,zone_code,seat_type)
+            VALUES ${values.join(",")}
+            ON CONFLICT (venue_id, row_number, seat_number) DO NOTHING
+          `);
+        }
+      }
+    }
 
     // создаём событие со статусом scheduled
     const ev = await pool.query(`
