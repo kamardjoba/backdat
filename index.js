@@ -312,7 +312,7 @@ app.get("/api/events/:id/seats", async (req, res) => {
       await pool.query("COMMIT")
     }
 
-    // Получаем места
+    // Получаем места с информацией о зонах
     const { rows } = await pool.query(`
       SELECT
         vs.id                         AS "seatId",
@@ -320,7 +320,9 @@ app.get("/api/events/:id/seats", async (req, res) => {
         vs.seat_number                AS seat,
         vs.zone_code                  AS zone,
         COALESCE(sa.status, 'available')              AS status,
-        COALESCE(pr.base_price, 100)::numeric(10,2)   AS price
+        COALESCE(pr.base_price, 100)::numeric(10,2)   AS price,
+        pz.name                       AS "zoneName",
+        pz.base_color                 AS "zoneColor"
       FROM events e
       JOIN venue_seats vs
         ON vs.venue_id = e.venue_id
@@ -328,11 +330,31 @@ app.get("/api/events/:id/seats", async (req, res) => {
         ON sa.event_id = e.id AND sa.seat_id = vs.id
       LEFT JOIN event_prices pr
         ON pr.event_id = e.id AND pr.zone_code = vs.zone_code
+      LEFT JOIN price_zones pz
+        ON pz.venue_id = e.venue_id AND pz.code = vs.zone_code
       WHERE e.id = $1
       ORDER BY vs.row_number, vs.seat_number
     `, [eventId])
 
-    res.json(rows)
+    // Получаем информацию о зонах с ценами
+    const zonesInfo = await pool.query(`
+      SELECT 
+        pz.code,
+        pz.name,
+        pz.base_color AS color,
+        COALESCE(MIN(pr.base_price), 100)::numeric(10,2) AS "minPrice",
+        COALESCE(MAX(pr.base_price), 100)::numeric(10,2) AS "maxPrice"
+      FROM price_zones pz
+      LEFT JOIN event_prices pr ON pr.event_id = $1 AND pr.zone_code = pz.code
+      WHERE pz.venue_id = $2
+      GROUP BY pz.code, pz.name, pz.base_color
+      ORDER BY pz.code
+    `, [eventId, venue_id])
+
+    res.json({
+      seats: rows,
+      zones: zonesInfo.rows
+    })
   } catch (e) {
     console.error(e)
     res.status(500).json({ error: "seats_fetch_failed", details: e.message })
