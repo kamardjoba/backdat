@@ -17,6 +17,7 @@ import jwt from "jsonwebtoken";
 const JWT_SECRET = process.env.JWT_SECRET || "change_me";
 const JWT_EXPIRES = process.env.JWT_EXPIRES || "7d";
 
+
 function signToken(user){
   return jwt.sign({ id:user.id, email:user.email, role:user.role }, JWT_SECRET, { expiresIn: JWT_EXPIRES });
 }
@@ -669,14 +670,12 @@ await client.query(`
       `, [orderId, seat_ids[i], itemPrices[i]]);
     }
 
-    // 8) зафиксируем транзакцию
+  
     await client.query("COMMIT");
 
-    // 9) отправим письмо с подтверждением (асинхронно, чтобы не задерживать ответ)
-    // функция sendOrderEmail(orderId) должна быть объявлена выше и настроена под SMTP
+    
     sendOrderEmail(orderId).catch(err => console.error("email failed:", err));
 
-    // 10) ответ клиенту
     res.status(201).json({ ok: true, order_id: orderId, total, currency: totals.currency });
 
   } catch (e) {
@@ -687,14 +686,7 @@ await client.query(`
     client.release();
   }
 });
-// === /ORDERS HANDLER ===
 
-/* ============================
- *        ADMIN  API
- * (добавь авторизацию позже)
- * ============================ */
-
-// Add artist (with photo)
 app.post("/api/admin/artists", upload.single("photo"), async (req, res) => {
   try {
     const { name, genre, bio } = req.body || {};
@@ -720,7 +712,6 @@ app.post("/api/admin/artists", upload.single("photo"), async (req, res) => {
   }
 });
 
-// Create venue + generate seats + default zones (A/B/VIP)
 app.post("/api/admin/venues", async (req, res) => {
   const { name, city, address, rows, cols } = req.body || {};
   if (!name || !city || !rows || !cols) return res.status(400).json({ error: "bad_payload" });
