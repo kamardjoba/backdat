@@ -724,10 +724,18 @@ const totals = {
 // <<< ДОБАВЛЕНО
 
 // 5) переведём выбранные места в 'booked'
+// Сначала создаём записи для мест, которых нет в seat_availability
+await client.query(`
+  INSERT INTO seat_availability(event_id, seat_id, status)
+  SELECT $1, unnest($2::int[]), 'booked'
+  ON CONFLICT (event_id, seat_id) DO NOTHING
+`, [event_id, seat_ids]);
+
+// Затем обновляем статус на 'booked' для всех выбранных мест
 await client.query(`
   UPDATE seat_availability
-  SET status='booked'
-  WHERE event_id=$1 AND seat_id = ANY($2) AND status='available'
+  SET status='booked', updated_at=NOW()
+  WHERE event_id=$1 AND seat_id = ANY($2)
 `, [event_id, seat_ids]);
 
 // 6) создаём заказ со статусом 'paid'
