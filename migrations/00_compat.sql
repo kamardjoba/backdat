@@ -82,6 +82,10 @@ ALTER TABLE IF EXISTS events
 ALTER TABLE IF EXISTS artists
   ADD COLUMN IF NOT EXISTS "cast" JSONB DEFAULT '[]'::jsonb;
 
+-- 6) Добавляем поле rating (рейтинг) в artists
+ALTER TABLE IF EXISTS artists
+  ADD COLUMN IF NOT EXISTS rating NUMERIC(3,1) DEFAULT 0.0;
+
 -- Примечание:
 -- Мы НЕ навешиваем здесь NOT NULL, чтобы миграция прошла мягко.
 -- Основная схема в 01_schema.sql может иметь строгие ограничения; сначала выравниваем структуру.

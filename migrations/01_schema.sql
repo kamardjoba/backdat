@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS artists (
   genre        TEXT,
   bio          TEXT,
   photo_url    TEXT,
+  rating       NUMERIC(3,1) DEFAULT 0.0,
   "cast"       JSONB DEFAULT '[]'::jsonb,
   socials_json JSONB DEFAULT '{}'::jsonb,
   created_at   TIMESTAMPTZ DEFAULT NOW()

@@ -56,7 +56,7 @@ await ensureDb();
 
 
 app.get("/api/artists", async (req, res) => {
-  const { rows } = await pool.query(`SELECT id, name, genre, bio, photo_url AS "photoUrl", "cast" FROM artists ORDER BY id DESC`);
+  const { rows } = await pool.query(`SELECT id, name, genre, bio, photo_url AS "photoUrl", rating, "cast" FROM artists ORDER BY id DESC`);
   res.json(rows);
 });
 
@@ -150,7 +150,7 @@ app.get("/api/events", async (req, res) => {
   const { rows } = await pool.query(`
     SELECT e.id, e.starts_at AS "startsAt", e.title, e.status,
            e.description, e.main_photo_url AS "mainPhotoUrl", e.photos,
-           a.id AS "artistId", a.name AS "artistName", a.photo_url AS "artistPhoto", a."cast" AS "artistCast",
+           a.id AS "artistId", a.name AS "artistName", a.photo_url AS "artistPhoto", a.rating AS "artistRating", a."cast" AS "artistCast",
            v.id AS "venueId", v.name AS "venueName", v.city
     FROM events e
     JOIN artists a ON a.id = e.artist_id
@@ -237,7 +237,7 @@ app.get("/api/events/:id", async (req, res) => {
   const { rows } = await pool.query(`
     SELECT e.id, e.starts_at AS "startsAt", e.title, e.status, e.dynamic_cfg AS "dynamicCfg",
            e.description, e.main_photo_url AS "mainPhotoUrl", e.photos,
-           a.id AS "artistId", a.name AS "artistName", a.genre, a.bio, a.photo_url AS "artistPhoto", a."cast" AS "artistCast",
+           a.id AS "artistId", a.name AS "artistName", a.genre, a.bio, a.photo_url AS "artistPhoto", a.rating AS "artistRating", a."cast" AS "artistCast",
            v.id AS "venueId", v.name AS "venueName", v.city, v.address, v.rows_count AS "rows", v.cols_count AS "cols"
     FROM events e
     JOIN artists a ON a.id = e.artist_id
@@ -785,7 +785,7 @@ await client.query(`
 
 app.post("/api/admin/artists", upload.single("photo"), async (req, res) => {
   try {
-    const { name, genre, bio, cast } = req.body || {};
+    const { name, genre, bio, cast, rating } = req.body || {};
     if (!name) return res.status(400).json({ error: "name_required" });
 
     let photoUrl = null;
@@ -806,11 +806,14 @@ app.post("/api/admin/artists", upload.single("photo"), async (req, res) => {
       }
     }
 
+    // Парсим rating, если не указан - используем 0
+    const ratingValue = rating ? parseFloat(rating) : 0.0;
+
     const { rows } = await pool.query(`
-      INSERT INTO artists(name, genre, bio, photo_url, "cast")
-      VALUES ($1,$2,$3,$4,$5)
-      RETURNING id, name, genre, bio, photo_url AS "photoUrl", "cast"
-    `, [name, genre || "", bio || "", photoUrl, JSON.stringify(castArray)]);
+      INSERT INTO artists(name, genre, bio, photo_url, rating, "cast")
+      VALUES ($1,$2,$3,$4,$5,$6)
+      RETURNING id, name, genre, bio, photo_url AS "photoUrl", rating, "cast"
+    `, [name, genre || "", bio || "", photoUrl, ratingValue, JSON.stringify(castArray)]);
 
     res.status(201).json(rows[0]);
   } catch (e) {
