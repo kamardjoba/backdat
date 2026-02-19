@@ -80,7 +80,7 @@ ALTER TABLE IF EXISTS events
 
 -- 5) Добавляем поле cast (состав) в artists
 ALTER TABLE IF EXISTS artists
-  ADD COLUMN IF NOT EXISTS cast JSONB DEFAULT '[]'::jsonb;
+  ADD COLUMN IF NOT EXISTS "cast" JSONB DEFAULT '[]'::jsonb;
 
 -- Примечание:
 -- Мы НЕ навешиваем здесь NOT NULL, чтобы миграция прошла мягко.
