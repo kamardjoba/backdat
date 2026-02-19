@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS artists (
   genre        TEXT,
   bio          TEXT,
   photo_url    TEXT,
+  cast         JSONB DEFAULT '[]'::jsonb,
   socials_json JSONB DEFAULT '{}'::jsonb,
   created_at   TIMESTAMPTZ DEFAULT NOW()
 );

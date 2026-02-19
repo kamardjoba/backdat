@@ -56,7 +56,7 @@ await ensureDb();
 
 
 app.get("/api/artists", async (req, res) => {
-  const { rows } = await pool.query(`SELECT id, name, genre, bio, photo_url AS "photoUrl" FROM artists ORDER BY id DESC`);
+  const { rows } = await pool.query(`SELECT id, name, genre, bio, photo_url AS "photoUrl", cast FROM artists ORDER BY id DESC`);
   res.json(rows);
 });
 
@@ -150,7 +150,7 @@ app.get("/api/events", async (req, res) => {
   const { rows } = await pool.query(`
     SELECT e.id, e.starts_at AS "startsAt", e.title, e.status,
            e.description, e.main_photo_url AS "mainPhotoUrl", e.photos,
-           a.id AS "artistId", a.name AS "artistName", a.photo_url AS "artistPhoto",
+           a.id AS "artistId", a.name AS "artistName", a.photo_url AS "artistPhoto", a.cast AS "artistCast",
            v.id AS "venueId", v.name AS "venueName", v.city
     FROM events e
     JOIN artists a ON a.id = e.artist_id
@@ -237,7 +237,7 @@ app.get("/api/events/:id", async (req, res) => {
   const { rows } = await pool.query(`
     SELECT e.id, e.starts_at AS "startsAt", e.title, e.status, e.dynamic_cfg AS "dynamicCfg",
            e.description, e.main_photo_url AS "mainPhotoUrl", e.photos,
-           a.id AS "artistId", a.name AS "artistName", a.genre, a.bio, a.photo_url AS "artistPhoto",
+           a.id AS "artistId", a.name AS "artistName", a.genre, a.bio, a.photo_url AS "artistPhoto", a.cast AS "artistCast",
            v.id AS "venueId", v.name AS "venueName", v.city, v.address, v.rows_count AS "rows", v.cols_count AS "cols"
     FROM events e
     JOIN artists a ON a.id = e.artist_id
@@ -785,7 +785,7 @@ await client.query(`
 
 app.post("/api/admin/artists", upload.single("photo"), async (req, res) => {
   try {
-    const { name, genre, bio } = req.body || {};
+    const { name, genre, bio, cast } = req.body || {};
     if (!name) return res.status(400).json({ error: "name_required" });
 
     let photoUrl = null;
@@ -795,11 +795,22 @@ app.post("/api/admin/artists", upload.single("photo"), async (req, res) => {
       fs.unlink(req.file.path, () => {});
     }
 
+    // Парсим cast если это строка JSON, иначе используем как есть
+    let castArray = [];
+    if (cast) {
+      try {
+        castArray = typeof cast === 'string' ? JSON.parse(cast) : cast;
+        if (!Array.isArray(castArray)) castArray = [];
+      } catch {
+        castArray = [];
+      }
+    }
+
     const { rows } = await pool.query(`
-      INSERT INTO artists(name, genre, bio, photo_url)
-      VALUES ($1,$2,$3,$4)
-      RETURNING id, name, genre, bio, photo_url AS "photoUrl"
-    `, [name, genre || "", bio || "", photoUrl]);
+      INSERT INTO artists(name, genre, bio, photo_url, cast)
+      VALUES ($1,$2,$3,$4,$5)
+      RETURNING id, name, genre, bio, photo_url AS "photoUrl", cast
+    `, [name, genre || "", bio || "", photoUrl, JSON.stringify(castArray)]);
 
     res.status(201).json(rows[0]);
   } catch (e) {

@@ -78,6 +78,10 @@ ALTER TABLE IF EXISTS events
   ADD COLUMN IF NOT EXISTS main_photo_url TEXT,
   ADD COLUMN IF NOT EXISTS photos JSONB DEFAULT '[]'::jsonb;
 
+-- 5) Добавляем поле cast (состав) в artists
+ALTER TABLE IF EXISTS artists
+  ADD COLUMN IF NOT EXISTS cast JSONB DEFAULT '[]'::jsonb;
+
 -- Примечание:
 -- Мы НЕ навешиваем здесь NOT NULL, чтобы миграция прошла мягко.
 -- Основная схема в 01_schema.sql может иметь строгие ограничения; сначала выравниваем структуру.
