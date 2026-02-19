@@ -33,12 +33,28 @@ INSERT INTO artists(name, genre, bio, photo_url)
 VALUES ('Imagine Dragons', 'Rock', 'American pop rock band', NULL)
 ON CONFLICT DO NOTHING;
 
--- event (с ближайшей датой)
-INSERT INTO events(artist_id, venue_id, starts_at, title, status)
-SELECT a.id, v.id, NOW() + INTERVAL '14 days', 'Imagine Dragons — Live', 'scheduled'
-FROM artists a, venues v
-WHERE a.name='Imagine Dragons' AND v.name='Main Arena'
-ON CONFLICT DO NOTHING;
+-- event (с ближайшей датой) - только если такого события еще нет
+DO $$
+DECLARE
+  a_id INT := (SELECT id FROM artists WHERE name='Imagine Dragons' LIMIT 1);
+  v_id INT := (SELECT id FROM venues WHERE name='Main Arena' LIMIT 1);
+  existing_count INT;
+BEGIN
+  IF a_id IS NOT NULL AND v_id IS NOT NULL THEN
+    -- Проверяем, есть ли уже событие Imagine Dragons на этой площадке
+    SELECT COUNT(*) INTO existing_count
+    FROM events e
+    WHERE e.artist_id = a_id 
+      AND e.venue_id = v_id 
+      AND e.title LIKE 'Imagine Dragons%';
+    
+    -- Создаем только если такого события нет
+    IF existing_count = 0 THEN
+      INSERT INTO events(artist_id, venue_id, starts_at, title, status)
+      VALUES (a_id, v_id, NOW() + INTERVAL '14 days', 'Imagine Dragons — Live', 'scheduled');
+    END IF;
+  END IF;
+END$$;
 
 -- event prices по зонам
 INSERT INTO event_prices(event_id, zone_code, base_price, multiplier)

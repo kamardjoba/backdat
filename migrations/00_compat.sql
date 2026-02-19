@@ -72,6 +72,12 @@ END$$;
 -- 3) Если seating_map пусто, зададим пустой jsonb по умолчанию (не обязателен, но удобно)
 UPDATE venues SET seating_map = '{}'::jsonb WHERE seating_map IS NULL;
 
+-- 4) Добавляем поля для описания и фото событий
+ALTER TABLE IF EXISTS events
+  ADD COLUMN IF NOT EXISTS description TEXT,
+  ADD COLUMN IF NOT EXISTS main_photo_url TEXT,
+  ADD COLUMN IF NOT EXISTS photos JSONB DEFAULT '[]'::jsonb;
+
 -- Примечание:
 -- Мы НЕ навешиваем здесь NOT NULL, чтобы миграция прошла мягко.
 -- Основная схема в 01_schema.sql может иметь строгие ограничения; сначала выравниваем структуру.

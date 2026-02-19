@@ -46,6 +46,7 @@ app.use(express.json());
 // Cloudinary
 cloudinary.config({ secure: true });
 const upload = multer({ dest: "uploads/" });
+const uploadMultiple = multer({ dest: "uploads/", limits: { fileSize: 10 * 1024 * 1024 } }).array("photos", 10); // до 10 фото
 
 // Health
 app.get("/health", (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
@@ -148,6 +149,7 @@ app.get("/api/venues", async (req, res) => {
 app.get("/api/events", async (req, res) => {
   const { rows } = await pool.query(`
     SELECT e.id, e.starts_at AS "startsAt", e.title, e.status,
+           e.description, e.main_photo_url AS "mainPhotoUrl", e.photos,
            a.id AS "artistId", a.name AS "artistName", a.photo_url AS "artistPhoto",
            v.id AS "venueId", v.name AS "venueName", v.city
     FROM events e
@@ -234,6 +236,7 @@ app.get("/api/my/orders", auth, async (req,res)=>{
 app.get("/api/events/:id", async (req, res) => {
   const { rows } = await pool.query(`
     SELECT e.id, e.starts_at AS "startsAt", e.title, e.status, e.dynamic_cfg AS "dynamicCfg",
+           e.description, e.main_photo_url AS "mainPhotoUrl", e.photos,
            a.id AS "artistId", a.name AS "artistName", a.genre, a.bio, a.photo_url AS "artistPhoto",
            v.id AS "venueId", v.name AS "venueName", v.city, v.address, v.rows_count AS "rows", v.cols_count AS "cols"
     FROM events e
@@ -851,12 +854,32 @@ app.post("/api/admin/venues", async (req, res) => {
 
 // Create event + init availability + prices
 // Create event + init availability + prices
-app.post("/api/admin/events", async (req, res) => {
-  const { artist_id, venue_id, starts_at, title, prices } = req.body || {};
+app.post("/api/admin/events", uploadMultiple, async (req, res) => {
+  const { artist_id, venue_id, starts_at, title, description, prices } = req.body || {};
   if (!artist_id || !venue_id || !starts_at) return res.status(400).json({ error: "bad_payload" });
 
   try {
     await pool.query("BEGIN");
+
+    // Загружаем фото в Cloudinary
+    let mainPhotoUrl = null;
+    const photoUrls = [];
+    
+    if (req.files && req.files.length > 0) {
+      // Первое фото - главное
+      const mainFile = req.files[0];
+      const mainUpload = await cloudinary.uploader.upload(mainFile.path, { folder: "events" });
+      mainPhotoUrl = mainUpload.secure_url;
+      fs.unlink(mainFile.path, () => {});
+      
+      // Остальные фото
+      for (let i = 1; i < req.files.length; i++) {
+        const file = req.files[i];
+        const upload = await cloudinary.uploader.upload(file.path, { folder: "events" });
+        photoUrls.push(upload.secure_url);
+        fs.unlink(file.path, () => {});
+      }
+    }
 
     // Проверяем, есть ли у площадки места, если нет - создаём их
     const seatsCheck = await pool.query(`
@@ -905,9 +928,17 @@ app.post("/api/admin/events", async (req, res) => {
 
     // создаём событие со статусом scheduled
     const ev = await pool.query(`
-      INSERT INTO events(artist_id, venue_id, starts_at, title, status)
-      VALUES ($1,$2,$3,$4,'scheduled') RETURNING id
-    `, [artist_id, venue_id, starts_at, title || null]);
+      INSERT INTO events(artist_id, venue_id, starts_at, title, status, description, main_photo_url, photos)
+      VALUES ($1,$2,$3,$4,'scheduled',$5,$6,$7) RETURNING id
+    `, [
+      artist_id, 
+      venue_id, 
+      starts_at, 
+      title || null,
+      description || null,
+      mainPhotoUrl,
+      JSON.stringify(photoUrls)
+    ]);
 
     const eventId = ev.rows[0].id;
 

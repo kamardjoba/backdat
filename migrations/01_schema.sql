@@ -50,6 +50,9 @@ CREATE TABLE IF NOT EXISTS events (
   starts_at    TIMESTAMPTZ NOT NULL,
   title        TEXT,
   status       TEXT NOT NULL DEFAULT 'scheduled',
+  description  TEXT,
+  main_photo_url TEXT,
+  photos       JSONB DEFAULT '[]'::jsonb,
   dynamic_cfg  JSONB DEFAULT '{}'::jsonb,
   created_at   TIMESTAMPTZ DEFAULT NOW()
 );
