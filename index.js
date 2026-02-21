@@ -869,7 +869,11 @@ app.post("/api/admin/venues", async (req, res) => {
 // Create event + init availability + prices
 // Create event + init availability + prices
 app.post("/api/admin/events", uploadMultiple, async (req, res) => {
-  const { artist_id, venue_id, starts_at, title, description, prices } = req.body || {};
+  const body = req.body || {};
+  let { artist_id, venue_id, starts_at, title, description, prices } = body;
+  if (typeof prices === "string") {
+    try { prices = JSON.parse(prices); } catch { prices = []; }
+  }
   if (!artist_id || !venue_id || !starts_at) return res.status(400).json({ error: "bad_payload" });
 
   try {
